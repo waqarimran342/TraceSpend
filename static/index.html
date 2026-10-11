@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SpendTrace</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header>
+  <div><b>SpendTrace</b> <small>Audit a receipt right on the photo &middot; results are preliminary, not official or legal</small></div>
+  <div id="ai" class="note" style="color:#fff">AI requests left today: &hellip;</div>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h3>1. Upload a receipt photo</h3>
+      <input type="file" id="file" accept="image/jpeg,image/png,image/webp">
+      <div id="msg"></div>
+    </div>
+    <div id="work" hidden>
+      <div class="card">
+        <div class="legend">
+          <span><i class="dot" style="background:#16a34a"></i>consistent</span>
+          <span><i class="dot" style="background:#eab308"></i>needs review</span>
+          <span><i class="dot" style="background:#dc2626"></i>audit finding</span>
+          <span><i class="dot" style="background:#2563eb"></i>extra charge</span>
+          <span><i class="dot" style="background:#6b7280"></i>unreadable</span>
+        </div>
+        <div class="stage"><img id="img" alt="receipt"><div class="ov" id="ov"></div></div>
+        <div class="note">Click any box to see the original crop and fix the number.</div>
+      </div>
+      <div class="card">
+        <h3>Faded receipt rescue</h3>
+        <button id="restore">Restore faded text</button>
+        <div class="note">Image processing only. It never invents characters; unreadable regions stay grey.</div>
+        <div id="cmpbox" hidden>
+          <div class="cmp"><img id="c1" alt="before"><div class="top" id="c2wrap" style="clip-path:inset(0 50% 0 0)"><img id="c2" alt="after"></div></div>
+          <input type="range" id="sl" min="0" max="100" value="50" style="width:100%">
+          <div class="note">Left: restored &middot; Right: before</div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section id="side" hidden>
+    <div class="card" id="panel" hidden>
+      <h3>Selected number</h3>
+      <div id="pinfo"></div>
+      <canvas id="crop" style="margin:8px 0"></canvas><br>
+      <input type="text" id="amt" size="12">
+      <button id="save">Save correction</button>
+      <button class="alt" id="confirm">It is correct</button>
+      <div id="prel"></div>
+    </div>
+    <div class="card">
+      <h3>Findings</h3>
+      <label class="note">Tax rate % (optional): <input type="number" id="tax" step="0.1" min="0" max="100" style="width:80px"></label>
+      <button class="alt" id="taxbtn">Check tax</button>
+      <div id="finds"></div>
+    </div>
+    <div class="card">
+      <h3>All lines</h3>
+      <table><tr><th>Label</th><th>Type</th><th>Amount</th></tr><tbody id="rows"></tbody></table>
+    </div>
+    <div class="card">
+      <h3>Tap to split</h3>
+      <input type="text" id="ppl" placeholder="Ali, Sara, Bilal" size="24">
+      <button id="setppl">Set people</button>
+      <div id="sp"></div>
+      <button id="dosplit" class="alt">Calculate who owes what</button>
+      <div id="owes"></div>
+    </div>
+    <div class="card">
+      <h3>Second opinion (Gemini)</h3>
+      <button id="askai">Ask Gemini</button>
+      <div class="note">Only the small cropped yellow numbers are sent, never the full receipt. Suggestions are unverified and never change anything until you accept.</div>
+      <div id="aiout"></div>
+    </div>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const COL={green:'#16a34a',yellow:'#eab308',red:'#dc2626',blue:'#2563eb'};
+let R=null,sel=null,people=[],assign={};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function api(p,o){const r=await fetch(p,o);let j={};try{j=await r.json()}catch(e){}if(!r.ok)throw new Error(j.detail||'Request failed');return j}
+const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+const msg=(t,bad)=>{$('msg').innerHTML=t?`<div class="${bad?'msg':'note'}">${esc(t)}</div>`:''};
+const badge=()=>{$('ai').textContent=`AI requests left today: ${R.ai_left}/${R.ai_cap}`};
+api('/ai/status').then(s=>{$('ai').textContent=`AI requests left today: ${s.ai_left}/${s.ai_cap}`}).catch(()=>{});
+
+$('file').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const fd=new FormData();fd.append('file',f);msg('Straightening and reading the receipt...');
+  try{R=await api('/upload',{method:'POST',body:fd});people=[];assign={};msg('');render()}catch(err){msg(err.message,true)}
+};
+
+function drawOverlay(){
+  let s=`<svg viewBox="0 0 ${R.width} ${R.height}" preserveAspectRatio="none" style="width:100%;height:100%">`;
+  for(const l of R.lines){const[x,y,w,h]=l.box;s+=`<rect class="box" data-id="${l.id}" x="${x-4}" y="${y-4}" width="${w+8}" height="${h+8}" fill="${COL[l.status]}" stroke="${COL[l.status]}"/>`}
+  for(const[x,y,w,h]of(R.unreadable||[]))s+=`<rect class="un" x="${x-2}" y="${y-2}" width="${w+4}" height="${h+4}"/>`;
+  $('ov').innerHTML=s+'</svg>';
+  document.querySelectorAll('rect.box').forEach(r=>r.onclick=()=>select(+r.dataset.id));
+}
+
+function render(){
+  $('work').hidden=false;$('side').hidden=false;
+  $('img').src=`/receipt/${R.id}/image/current?t=${Date.now()}`;
+  drawOverlay();
+  $('tax').value=R.tax_rate??'';
+  const f=R.findings;
+  $('finds').innerHTML=f.length?f.map((x,i)=>`<div class="find ${x.severity}" data-i="${i}"><b>${esc(x.title)}</b><br>${esc(x.explain)}<code>${esc(x.arithmetic)}</code>${x.uncertain?'<div class="note">&#9888; Built on a number that may be misread. Check the yellow boxes first.</div>':''}</div>`).join(''):'<div class="note">No findings. Every checkable number is consistent (preliminary).</div>';
+  document.querySelectorAll('.find[data-i]').forEach(e=>e.onclick=()=>{const x=f[+e.dataset.i];if(x.line_ids.length)select(x.line_ids[0])});
+  $('rows').innerHTML=R.lines.map(l=>`<tr class="row" data-id="${l.id}"><td><span class="dot" style="background:${COL[l.status]}"></span>${esc(l.label)}</td><td>${l.kind}</td><td>${esc(l.amount)}</td></tr>`).join('')||'<tr><td colspan=3>No priced lines found. Try Restore, or retake the photo.</td></tr>';
+  document.querySelectorAll('tr.row').forEach(e=>e.onclick=()=>select(+e.dataset.id));
+  renderSplit();badge();
+  $('cmpbox').hidden=!R.restored;
+  if(R.restored){$('c1').src=`/receipt/${R.id}/image/fixed?t=${Date.now()}`;$('c2').src=`/receipt/${R.id}/image/restored?t=${Date.now()}`}
+}
+
+function select(id){
+  sel=id;const l=R.lines.find(x=>x.id===id);if(!l)return;
+  $('panel').hidden=false;
+  $('pinfo').innerHTML=`<b>${esc(l.label)}</b> (${l.kind}): read as <b>${esc(l.amount)}</b>, confidence ${Math.round(l.conf)}%${l.status==='yellow'?' &mdash; <b>needs review</b>':''}`;
+  $('amt').value=l.amount;
+  const[x,y,w,h]=l.box,c=$('crop'),sc=Math.min(3,600/w);
+  c.width=Math.max(1,Math.round(w*sc));c.height=Math.max(1,Math.round(h*sc));
+  c.getContext('2d').drawImage($('img'),x,y,w,h,0,0,c.width,c.height);
+  $('prel').innerHTML=R.findings.filter(f=>f.line_ids.includes(id)).map(f=>`<div class="find ${f.severity}"><b>${esc(f.title)}</b><code>${esc(f.arithmetic)}</code></div>`).join('');
+}
+
+const merge=v=>{Object.assign(R,v);render();if(sel!==null)select(sel)};
+$('save').onclick=async()=>{try{merge(await post(`/receipt/${R.id}/edit`,{line_id:sel,amount:$('amt').value}));msg('')}catch(e){msg(e.message,true)}};
+$('confirm').onclick=async()=>{try{merge(await post(`/receipt/${R.id}/confirm`,{line_id:sel}))}catch(e){msg(e.message,true)}};
+$('taxbtn').onclick=async()=>{try{const v=$('tax').value;merge(await post(`/receipt/${R.id}/tax`,{tax_rate:v===''?null:parseFloat(v)}))}catch(e){msg(e.message,true)}};
+$('sl').oninput=e=>{$('c2wrap').style.clipPath=`inset(0 ${100-e.target.value}% 0 0)`};
+
+$('restore').onclick=async()=>{
+  msg('Restoring...');
+  try{const v=await post(`/receipt/${R.id}/restore`);const r=v.restore;R.unreadable=r.unreadable;
+    msg(`Text confidence ${r.before}% -> ${r.after}%.`+(r.adopted?'':' The restored version was not better, so the original was kept.')+' Grey dashed boxes are unreadable and were not guessed.');
+    merge(v)}catch(e){msg(e.message,true)}
+};
+
+function renderSplit(){
+  const items=R.lines.filter(l=>l.kind==='item');
+  $('sp').innerHTML=people.length&&items.length?'<table><tr><th>Item</th><th>Rs</th>'+people.map(p=>`<th>${esc(p)}</th>`).join('')+'</tr>'+items.map(l=>`<tr><td>${esc(l.label)}</td><td>${esc(l.amount)}</td>`+people.map(p=>`<td><input type="checkbox" data-l="${l.id}" data-p="${esc(p)}" ${(assign[l.id]||[]).includes(p)?'checked':''}></td>`).join('')+'</tr>').join('')+'</table>':'<div class="note">Add people, then tick who shared each item.</div>';
+  document.querySelectorAll('#sp input[type=checkbox]').forEach(cb=>cb.onchange=()=>{const id=cb.dataset.l,p=cb.dataset.p;assign[id]=assign[id]||[];if(cb.checked)assign[id].push(p);else assign[id]=assign[id].filter(x=>x!==p)});
+}
+$('setppl').onclick=()=>{people=[...new Set($('ppl').value.split(',').map(s=>s.trim()).filter(Boolean))];assign={};renderSplit()};
+$('dosplit').onclick=async()=>{
+  try{const v=await post(`/receipt/${R.id}/split`,{people,assignments:assign});
+    $('owes').innerHTML='<table>'+Object.entries(v.owes).map(([p,a])=>`<tr><td>${esc(p)}</td><td><b>Rs ${esc(a)}</b></td></tr>`).join('')+`</table><div class="note">Tax, fees and discounts (Rs ${esc(v.extras)}) are shared in proportion to items.${+v.unassigned?` Unassigned items: Rs ${esc(v.unassigned)}.`:''}</div>`}
+  catch(e){msg(e.message,true)}
+};
+
+$('askai').onclick=async()=>{
+  msg('Asking Gemini...');
+  try{const v=await post(`/receipt/${R.id}/ask-gemini`);R.ai_left=v.ai_left;badge();
+    if(!v.ok){msg(v.message,true);return}
+    msg('');
+    $('aiout').innerHTML='<div class="note">AI suggestions (unverified)</div>'+v.suggestions.map(s=>`<div class="find ${s.agree?'info':'amber'}">Line ${s.line_id}: local <b>${esc(s.local)}</b> vs AI <b>${esc(s.ai??'unreadable')}</b>${s.agree?' &mdash; two readers agree (please still confirm)':' &mdash; they differ, stays yellow'}${s.ai?`<br><button class="alt acc" data-id="${s.line_id}" data-v="${esc(s.ai)}">Accept this value</button>`:''}</div>`).join('');
+    document.querySelectorAll('.acc').forEach(b=>b.onclick=async()=>{try{sel=+b.dataset.id;merge(await post(`/receipt/${R.id}/edit`,{line_id:sel,amount:b.dataset.v}))}catch(e){msg(e.message,true)}});
+  }catch(e){msg(e.message,true)}
+};
+</script>
+</body>
+</html>
